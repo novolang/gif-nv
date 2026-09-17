@@ -1,0 +1,43 @@
+[package]
+name        = "gif-nv"
+version     = "0.0.1"
+description = "GIF89a as a feed-and-drain codec: bytes pushed in and frames pulled out, with LZW, interlace, global and local colour tables, the four disposal methods, delays and the NETSCAPE loop extension all typed rather than inferred; and an encoder with a median-cut quantiser and optional dithering.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A GIF decoder that opened the file would be a decoder no
+# caller could drive from a socket, a memory buffer or an archive
+# member.  So the bytes arrive as arguments and the frames leave as
+# values: `gifread.feed` takes a slice and `gifread.next` hands back
+# what that slice completed.  Nothing here reads, writes or waits.
+layer       = "core"
+
+category    = "graphics"
+
+tags        = ["gif", "gif89a", "lzw", "animation", "codec", "palette", "median-cut", "dither", "sans-io"]
+repository  = "https://github.com/novolang/gif-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "GIF89a decoded frame by frame and encoded with a median-cut palette"
+
+[dependencies]
+# color-nv supplies `Srgb8`, which is what a GIF colour table entry
+# IS — three bytes of red, green and blue, with no alpha channel
+# anywhere in the format.  Carrying a private three-byte struct here
+# would mean every consumer converting a palette on its way to a
+# renderer, and the two structs would be the same three bytes with
+# different names.  `Srgba8` is what a frame's pixels become once the
+# transparent index has been applied, which is why both appear.
+# `core`, so the layer rule holds.
+color-nv = "^0.0.1"

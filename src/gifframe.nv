@@ -1,0 +1,452 @@
+// gifframe.nv — the canvas, a frame, and the four disposal methods.
+//
+// A GIF IS A CANVAS AND A LIST OF PATCHES
+//
+// The logical screen descriptor gives the canvas its size and its
+// background colour.  Every frame after it is a RECTANGLE placed
+// somewhere on that canvas — a patch, not a picture.  A frame may be
+// smaller than the canvas, may sit anywhere inside it, and carries its
+// own colour table if it wants one.
+//
+// That is the fact a caller most often gets wrong, because the frames
+// of most animations happen to be the whole canvas and code written
+// against them breaks the first time it meets an optimised file, where
+// frame 2 is the eleven pixels that changed.
+//
+// DISPOSAL IS WHAT HAPPENS BEFORE THE NEXT FRAME, NOT TO THIS ONE
+//
+// The Graphic Control Extension's disposal method says what the
+// renderer does with THIS frame's area once its delay has elapsed and
+// before the next frame is drawn.  There are four, and getting them
+// wrong is why so many GIF renderers leave trails or flicker.
+//
+// This package DECODES them and does not composite.  `GifDisposal` is
+// a typed answer and `gifframe.disposal_of` reads it; there is no
+// `render` here, because compositing needs a canvas buffer, which is
+// an allocation policy, which belongs to whoever owns the screen.
+// image-nv is the row that will composite, over this one.
+//
+// THE DELAY IS IN CENTISECONDS AND THE BROWSERS LIE ABOUT IT
+//
+// The field is hundredths of a second.  A delay of 0 or 1 means "as
+// fast as possible", and every major browser silently substitutes 10
+// centiseconds for anything below 2 — so a file that says 1 plays at
+// 10 in Chrome and at 1 in an image viewer.  This package reports what
+// the file says.  `gifframe.browser_delay_cs` computes the substituted
+// number for a caller that needs to predict a browser, and it is a
+// separate function precisely so that reading a file never silently
+// changes it.
+
+use gifpalette
+
+// The largest canvas dimension GIF's two-byte fields can express.
+pub const GIF_MAX_DIMENSION = 65535
+
+// What a renderer does with a frame's area before drawing the next
+// frame.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println(gifframe.disposal_name(GifDisposeBackground))
+// ```
+pub enum GifDisposal
+    // 0: the file says nothing.  Treated as `GifDisposeKeep` by every
+    // renderer, and kept distinct here because a file that says
+    // nothing and a file that says "keep" are different files and a
+    // validator should be able to tell.
+    GifDisposeUnspecified
+    // 1: leave the frame where it is.  The next frame is drawn over
+    // it.  The ordinary case, and what an optimised animation needs.
+    GifDisposeKeep
+    // 2: fill the frame's rectangle with the background colour — or,
+    // in every browser and contrary to the specification's words, with
+    // TRANSPARENT.  The README states that divergence, because a file
+    // that relies on either behaviour looks wrong under the other.
+    GifDisposeBackground
+    // 3: restore the frame's rectangle to what was there before this
+    // frame was drawn.  Requires a renderer to have kept a copy, which
+    // is why several renderers ignore it.
+    GifDisposeRestore
+
+// How many times an animation plays.
+//
+// Three cases and not a number, because "no NETSCAPE extension at all"
+// and "a NETSCAPE extension saying 0" are different files that behave
+// differently, and an `Int` cannot hold the difference.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.plays_forever(GifLoopForever)}")   // true
+// ```
+pub enum GifLoop
+    // No NETSCAPE 2.0 Application Extension in the stream.  The
+    // specification says nothing, and the convention is to play once.
+    GifLoopAbsent
+    // A NETSCAPE 2.0 extension with a count of 0, which means forever.
+    GifLoopForever
+    // A NETSCAPE 2.0 extension with a count of 1 to 65535, which means
+    // that many REPEATS after the first play in most renderers and
+    // that many plays in some.  The count is reported; the ambiguity
+    // is stated in the README rather than resolved silently.
+    GifLoopCount(times: Int)
+
+// The canvas every frame is placed on: the logical screen descriptor.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.screen(320, 240)
+//         Ok(s)  => println("${s.width}")       // 320
+//         Err(e) => println(e.message())
+// ```
+pub struct GifScreen
+    // Canvas width in pixels, 1 to 65535.
+    width: Int
+    // Canvas height in pixels, 1 to 65535.
+    height: Int
+    // The global colour table, or `None` when the stream has none and
+    // every frame must carry its own.
+    global_palette: ?GifPalette
+    // The index into the global table the file nominates as the
+    // background.  Meaningless without a global table, and ignored by
+    // every browser, which draws transparent instead.
+    background_index: Int
+    // The pixel aspect ratio field, raw.  0 means "no information",
+    // and the ratio is `(value + 15) / 64` otherwise.  Ignored by
+    // every renderer written in the last thirty years.
+    aspect_ratio: Int
+
+// One frame: a rectangle of colour indices placed on the canvas.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.GIF_MAX_DIMENSION}")   // 65535
+// ```
+pub struct GifFrame
+    // Where the frame's left edge sits on the canvas.
+    left: Int
+    // Where the frame's top edge sits on the canvas.
+    top: Int
+    // The frame's own width, which may be less than the canvas's.
+    width: Int
+    // The frame's own height.
+    height: Int
+    // The frame's own colour table, or `None` to use the global one.
+    local_palette: ?GifPalette
+    // Whether the rows are stored in the four-pass interlaced order.
+    interlaced: Bool
+    // The transparent colour index, or `None` when the frame declares
+    // none.  A pixel holding it is not drawn.
+    transparent_index: ?Int
+    // How long the frame is shown, in hundredths of a second, as the
+    // FILE states it.
+    delay_cs: Int
+    // What to do with this frame's area before the next frame.
+    disposal: GifDisposal
+    // Whether the file asks a renderer to wait for user input before
+    // advancing.  Honoured by almost nothing, reported because it is
+    // in the file.
+    user_input: Bool
+    // One colour index per pixel, row-major, `width * height` of them,
+    // ALREADY DE-INTERLACED.  A decoder that handed back interlaced
+    // rows would be handing back a layout its caller has to know about
+    // to use at all; `gifframe.interlace_row_order` is there for the
+    // caller that wants the file's own order.
+    indices: Bytes
+
+// A canvas, or `GifFrameTooLarge` when a dimension is outside 1 to
+// 65535.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.screen(0, 240)
+//         Ok(_)  => println("this cannot happen — a canvas has width")
+//         Err(e) => println(e.message())
+// ```
+pub fn screen(width: Int, height: Int) -> Result<GifScreen, GifFault> []
+    todo("gif-nv.gifframe.screen")
+
+// The same canvas with a global colour table.
+//
+// ```novo
+// use gifpalette
+// use gifframe
+// use srgb
+//
+// fn main() [io]
+//     match gifframe.screen(16, 16)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//             match gifframe.with_global_palette(s, p).global_palette
+//                 Some(_) => println("global table set")
+//                 None    => println("no global table")
+// ```
+pub fn with_global_palette(s: GifScreen, p: GifPalette) -> GifScreen []
+    todo("gif-nv.gifframe.with_global_palette")
+
+// The colour table that applies to a frame: its own if it has one, the
+// canvas's global table otherwise, and `None` when it has neither.
+//
+// The rule of the format, written once.  Every caller that resolves a
+// pixel needs it, and every caller that writes it itself gets the
+// precedence backwards at least once.
+//
+// ```novo
+// use std.bytes
+// use gifpalette
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.screen(16, 16)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             let px = bytes.zeros(16)
+//             match gifframe.palette_for(s, gifframe.frame(0, 0, 4, 4, px))
+//                 Some(_) => println("a table applies")
+//                 None    => println("neither table exists — the stream cannot be drawn")
+// ```
+pub fn palette_for(s: GifScreen, f: GifFrame) -> ?GifPalette []
+    todo("gif-nv.gifframe.palette_for")
+
+// A frame at a position, with its pixels and every option at its
+// default: no local table, not interlaced, no transparency, no delay,
+// disposal unspecified.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1, 0])).width}")   // 2
+// ```
+pub fn frame(left: Int, top: Int, width: Int, height: Int, indices: Bytes) -> GifFrame []
+    todo("gif-nv.gifframe.frame")
+
+// The same frame with a local colour table.
+//
+// ```novo
+// use std.bytes
+// use gifpalette
+// use gifframe
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     let f = gifframe.with_local_palette(gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1, 0])), p)
+//     match f.local_palette
+//         Some(_) => println("local table set")
+//         None    => println("no local table")
+// ```
+pub fn with_local_palette(f: GifFrame, p: GifPalette) -> GifFrame []
+    todo("gif-nv.gifframe.with_local_palette")
+
+// The same frame with a delay, in hundredths of a second.
+//
+// Stored as given.  A browser will substitute 10 for anything below 2,
+// and `browser_delay_cs` is where that fact lives; it does not happen
+// here, because a decoder that changed what a file said would make a
+// round trip lossy.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.with_delay(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), 4).delay_cs}")   // 4
+// ```
+pub fn with_delay(f: GifFrame, centiseconds: Int) -> GifFrame []
+    todo("gif-nv.gifframe.with_delay")
+
+// The same frame with a disposal method.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     let f = gifframe.with_disposal(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), GifDisposeBackground)
+//     println(gifframe.disposal_name(gifframe.disposal_of(f)))
+// ```
+pub fn with_disposal(f: GifFrame, d: GifDisposal) -> GifFrame []
+    todo("gif-nv.gifframe.with_disposal")
+
+// The same frame with a transparent colour index.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.with_transparent(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), 0).transparent_index
+//         Some(i) => println("${i}")            // 0
+//         None    => println("none")
+// ```
+pub fn with_transparent(f: GifFrame, index: Int) -> GifFrame []
+    todo("gif-nv.gifframe.with_transparent")
+
+// The same frame marked as interlaced, for an encoder that wants the
+// file's rows stored in the four-pass order.
+//
+// The pixels stay in row-major order; the flag says how they are
+// WRITTEN.  A decoder de-interlaces on the way in, so a frame's
+// `indices` are always top to bottom whatever this says.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.with_interlace(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), true).interlaced}")
+// ```
+pub fn with_interlace(f: GifFrame, interlaced: Bool) -> GifFrame []
+    todo("gif-nv.gifframe.with_interlace")
+
+// The frame's disposal method.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     println(gifframe.disposal_name(gifframe.disposal_of(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])))))
+// ```
+pub fn disposal_of(f: GifFrame) -> GifDisposal []
+    todo("gif-nv.gifframe.disposal_of")
+
+// The disposal method's name: `"unspecified"`, `"keep"`,
+// `"background"`, `"restore"`.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println(gifframe.disposal_name(GifDisposeRestore))   // restore
+// ```
+pub fn disposal_name(d: GifDisposal) -> Str []
+    todo("gif-nv.gifframe.disposal_name")
+
+// The three-bit code the file stores for a disposal method: 0, 1, 2, 3.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.disposal_code(GifDisposeBackground)}")   // 2
+// ```
+pub fn disposal_code(d: GifDisposal) -> Int []
+    todo("gif-nv.gifframe.disposal_code")
+
+// The disposal method a code names.  4 to 7 are reserved and answer
+// `GifDisposeUnspecified`, which is what every renderer does with
+// them.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println(gifframe.disposal_name(gifframe.disposal_from_code(6)))   // unspecified
+// ```
+pub fn disposal_from_code(code: Int) -> GifDisposal []
+    todo("gif-nv.gifframe.disposal_from_code")
+
+// Whether a frame's rectangle is entirely inside a canvas.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.screen(4, 4)
+//         Err(e) => println(e.message())
+//         Ok(s)  => println("${gifframe.fits_screen(s, gifframe.frame(3, 3, 2, 2, bytes.from_byte_list([0, 0, 0, 0])))}")
+// ```
+pub fn fits_screen(s: GifScreen, f: GifFrame) -> Bool []
+    todo("gif-nv.gifframe.fits_screen")
+
+// The source row each destination row comes from, in the four-pass
+// interlaced order.
+//
+// Pass 1 is every eighth row from 0, pass 2 every eighth from 4, pass
+// 3 every fourth from 2, pass 4 every second from 1.  A decoder uses
+// it to put the rows back; a caller that wants to show a partially
+// loaded image — which is what interlacing is FOR — uses it to know
+// which rows it already has.
+//
+// ```novo
+// use std.list
+// use gifframe
+//
+// fn main() [io]
+//     let order = gifframe.interlace_row_order(8)
+//     println("${list.len(order)}")             // 8
+//     println("${list.get(order, 0)}")          // 0
+//     println("${list.get(order, 1)}")          // 8 is out of range, so pass 2 starts: 4
+// ```
+pub fn interlace_row_order(height: Int) -> [Int] []
+    todo("gif-nv.gifframe.interlace_row_order")
+
+// Whether an animation plays without end.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.plays_forever(GifLoopAbsent)}")   // false
+// ```
+pub fn plays_forever(l: GifLoop) -> Bool []
+    todo("gif-nv.gifframe.plays_forever")
+
+// The loop a NETSCAPE 2.0 count means, or `GifLoopCountOutOfRange`.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     match gifframe.loop_from_count(0)
+//         Ok(l)  => println("${gifframe.plays_forever(l)}")   // true
+//         Err(e) => println(e.message())
+// ```
+pub fn loop_from_count(count: Int) -> Result<GifLoop, GifFault> []
+    todo("gif-nv.gifframe.loop_from_count")
+
+// The delay a browser will actually use, in hundredths of a second.
+//
+// Every major browser substitutes 10 for a delay below 2, which is why
+// a file that says 1 plays ten times slower in a browser than in an
+// image viewer.  A SEPARATE function from `delay_cs` so that reading a
+// file never silently changes what it said, and so that a caller
+// authoring for the web can ask what will happen.
+//
+// ```novo
+// use gifframe
+//
+// fn main() [io]
+//     println("${gifframe.browser_delay_cs(1)}")    // 10
+//     println("${gifframe.browser_delay_cs(4)}")    // 4
+// ```
+pub fn browser_delay_cs(delay_cs: Int) -> Int []
+    todo("gif-nv.gifframe.browser_delay_cs")
+
+// How long a sequence of frames runs, in hundredths of a second, as
+// the file states the delays.
+//
+// ```novo
+// use std.bytes
+// use gifframe
+//
+// fn main() [io]
+//     let a = gifframe.with_delay(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), 4)
+//     println("${gifframe.total_duration_cs([a, a])}")   // 8
+// ```
+pub fn total_duration_cs(frames: [GifFrame]) -> Int []
+    todo("gif-nv.gifframe.total_duration_cs")

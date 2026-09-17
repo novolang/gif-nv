@@ -1,0 +1,301 @@
+// gifpalette.nv — the colour tables, the transparent index, and the
+// quantiser that gets an image down to 256 colours.
+//
+// A GIF HAS NO ALPHA CHANNEL
+//
+// A GIF pixel is an INDEX into a colour table of at most 256 entries,
+// and a table entry is three bytes of red, green and blue.  There is
+// no alpha anywhere in the format.  What GIF89a has instead is one
+// index per frame nominated as TRANSPARENT by the Graphic Control
+// Extension: a pixel holding that index is not drawn, and whatever was
+// underneath shows through.  So transparency is binary — a pixel is
+// drawn or it is not — and a frame that fades cannot be expressed.
+//
+// That is why `GifPalette` holds `Srgb8` and `gifpalette.resolve`
+// answers `Srgba8`: the alpha byte is 0 or 255 and nothing else, and
+// it is produced by the transparent index rather than stored.
+//
+// TWO TABLES, AND THE LOCAL ONE WINS
+//
+// The stream may carry a GLOBAL colour table after the logical screen
+// descriptor, and each frame may carry a LOCAL one of its own.  A
+// frame with a local table uses it; a frame without one uses the
+// global table; a frame with neither is a stream that cannot be drawn.
+// `gifpalette.for_frame` is that rule, written once.
+//
+// THE QUANTISER IS MEDIAN CUT
+//
+// An encoder handed true colour has to choose 256 colours out of up to
+// sixteen million.  Median cut (Heckbert, 1982) sorts the colours into
+// a box, splits the box along its longest axis at the median, and
+// repeats until there are as many boxes as colours wanted.  It is the
+// algorithm Pillow and the `gif` crate both use, it is deterministic,
+// and it needs no random numbers — which is what lets it live in a
+// package that declares no effects.
+
+use srgb
+
+// The largest colour table GIF permits.
+pub const GIF_MAX_COLORS = 256
+
+// A colour table: up to 256 entries of red, green and blue.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     match gifpalette.palette([srgb.black(), srgb.white()])
+//         Ok(p)  => println("${gifpalette.color_count(p)}")   // 2
+//         Err(e) => println(e.message())
+// ```
+pub struct GifPalette
+    // The entries, in the order the file stores them, which is the
+    // order an index names.
+    colors: [Srgb8]
+
+// How a quantiser spreads the error it makes.
+//
+// ```novo
+// use gifpalette
+//
+// fn main() [io]
+//     println(gifpalette.dither_name(GifDitherFloydSteinberg))
+// ```
+pub enum GifDither
+    // None.  Each pixel takes the nearest palette entry, and a smooth
+    // gradient comes out as visible bands.
+    GifDitherNone
+    // Floyd–Steinberg: the error at each pixel is pushed into the four
+    // neighbours ahead of it in scan order.  Bands become noise, which
+    // the eye forgives more easily.
+    GifDitherFloydSteinberg
+    // An ordered 8-by-8 Bayer matrix.  Worse than Floyd–Steinberg on a
+    // photograph and better on an animation, because the pattern is
+    // fixed: Floyd–Steinberg's noise changes between frames and the
+    // change is what a viewer sees as crawling.
+    GifDitherOrdered
+
+// A colour table, or `GifBadTableSize`.
+//
+// The format stores a table's size as a three-bit exponent, so the
+// eight sizes it can express are 2, 4, 8, 16, 32, 64, 128 and 256.  A
+// table of other than one of those cannot be written, and refusing at
+// construction is what keeps that from being discovered at encode
+// time.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     match gifpalette.palette([srgb.black(), srgb.white(), srgb.black()])
+//         Ok(_)  => println("this cannot happen — three is not a table size")
+//         Err(e) => println(e.message())
+// ```
+pub fn palette(colors: [Srgb8]) -> Result<GifPalette, GifFault> []
+    todo("gif-nv.gifpalette.palette")
+
+// A colour table padded up to the next size the format can express.
+//
+// The ordinary way to build one: a caller with nineteen colours wants
+// a table of 32, not a refusal.  The padding entries are black.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white(), srgb.black()])
+//     println("${gifpalette.color_count(p)}")   // 4
+// ```
+pub fn palette_padded(colors: [Srgb8]) -> GifPalette []
+    todo("gif-nv.gifpalette.palette_padded")
+
+// How many entries the table holds.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     println("${gifpalette.color_count(gifpalette.palette_padded([srgb.white()]))}")   // 2
+// ```
+pub fn color_count(p: GifPalette) -> Int []
+    todo("gif-nv.gifpalette.color_count")
+
+// The three-bit size exponent the file stores: `log2(count) - 1`.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     println("${gifpalette.size_exponent(gifpalette.palette_padded([srgb.white()]))}")   // 0
+// ```
+pub fn size_exponent(p: GifPalette) -> Int []
+    todo("gif-nv.gifpalette.size_exponent")
+
+// The colour an index names, or `None` when the index is past the end
+// of the table.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     match gifpalette.color_at(gifpalette.palette_padded([srgb.white()]), 9)
+//         Some(_) => println("this cannot happen — the table holds two")
+//         None    => println("out of the table")
+// ```
+pub fn color_at(p: GifPalette, index: Int) -> ?Srgb8 []
+    todo("gif-nv.gifpalette.color_at")
+
+// The colour an index names, WITH its alpha: fully transparent when
+// the index is the frame's transparent one, fully opaque otherwise.
+//
+// The alpha byte is 0 or 255 and never anything between, because GIF
+// transparency is one index and not a channel.  A caller that wanted a
+// fade wanted a different format.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     match gifpalette.resolve(p, 0, 0)
+//         Some(px) => println("${px.a}")        // 0 — index 0 is transparent
+//         None     => println("out of the table")
+// ```
+pub fn resolve(p: GifPalette, index: Int, transparent_index: Int) -> ?Srgba8 []
+    todo("gif-nv.gifpalette.resolve")
+
+// The index of the entry nearest this colour, by squared distance in
+// sRGB.
+//
+// SQUARED DISTANCE IN sRGB is not perceptual and this says so: two
+// colours a person cannot tell apart can be far apart by this measure
+// and two a person can distinguish can be close.  It is what every GIF
+// encoder does, it is what the reference implementations do, and the
+// alternative — a distance in Oklab — is a colour-space conversion per
+// pixel per palette entry.  A caller that wants the perceptual answer
+// converts with color-nv and quantises there.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     println("${gifpalette.nearest_index(p, srgb.rgb8(250, 250, 250))}")   // 1
+// ```
+pub fn nearest_index(p: GifPalette, c: Srgb8) -> Int []
+    todo("gif-nv.gifpalette.nearest_index")
+
+// Whether every colour in this list is already in the table.
+//
+// The question an encoder asks before it quantises: an image drawn
+// from a fixed palette — a chart, a screenshot of flat colours, a
+// pixel-art sprite — must be written exactly, and running it through a
+// quantiser would move colours the author chose.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     println("${gifpalette.covers(p, [srgb.white()])}")   // true
+// ```
+pub fn covers(p: GifPalette, colors: [Srgb8]) -> Bool []
+    todo("gif-nv.gifpalette.covers")
+
+// The distinct colours in a pixel buffer, in first-seen order, up to
+// `limit`.
+//
+// Stops at the limit rather than collecting them all, so that asking
+// "does this image have at most 256 colours" over a photograph costs
+// 257 distinct colours and not sixteen million.
+//
+// ```novo
+// use std.list
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let px = [srgb.black(), srgb.white(), srgb.black()]
+//     println("${list.len(gifpalette.distinct_colors(px, 256))}")   // 2
+// ```
+pub fn distinct_colors(pixels: [Srgb8], limit: Int) -> [Srgb8] []
+    todo("gif-nv.gifpalette.distinct_colors")
+
+// A palette of at most `wanted` colours chosen by median cut.
+//
+// Heckbert's algorithm: put every colour of the image in one box,
+// split the box along its longest axis at the median, and repeat on
+// the box with the most colours until there are `wanted` boxes.  Each
+// box contributes the average of the colours in it.
+//
+// Deterministic, so the same image gives the same palette every time —
+// which is what lets an animation's frames share one table without the
+// colours drifting between them.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     match gifpalette.median_cut([srgb.black(), srgb.white()], 16)
+//         Ok(p)  => println("${gifpalette.color_count(p)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn median_cut(pixels: [Srgb8], wanted: Int) -> Result<GifPalette, GifFault> []
+    todo("gif-nv.gifpalette.median_cut")
+
+// A palette for a whole animation: median cut over every frame's
+// pixels at once.
+//
+// THE FUNCTION THAT STOPS AN ANIMATION FLICKERING.  A palette computed
+// per frame moves every colour slightly between frames, and the eye
+// reads that as the whole picture shimmering.  One table for the
+// sequence costs a little accuracy in each frame and removes it.
+//
+// ```novo
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     match gifpalette.median_cut_shared([[srgb.black()], [srgb.white()]], 16)
+//         Ok(p)  => println("${gifpalette.color_count(p)}")
+//         Err(e) => println(e.message())
+// ```
+pub fn median_cut_shared(frames: [[Srgb8]], wanted: Int) -> Result<GifPalette, GifFault> []
+    todo("gif-nv.gifpalette.median_cut_shared")
+
+// The dither's name: `"none"`, `"floyd-steinberg"`, `"ordered"`.
+//
+// ```novo
+// use gifpalette
+//
+// fn main() [io]
+//     println(gifpalette.dither_name(GifDitherNone))   // none
+// ```
+pub fn dither_name(d: GifDither) -> Str []
+    todo("gif-nv.gifpalette.dither_name")
+
+// A pixel buffer mapped to palette indices, with the error spread as
+// the dither says.
+//
+// ```novo
+// use std.bytes
+// use gifpalette
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     let ix = gifpalette.quantize([srgb.white()], p, 1, GifDitherNone)
+//     println("${bytes.len(ix)}")               // 1
+// ```
+pub fn quantize(pixels: [Srgb8], p: GifPalette, width: Int, d: GifDither) -> Bytes []
+    todo("gif-nv.gifpalette.quantize")

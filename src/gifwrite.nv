@@ -1,0 +1,332 @@
+// gifwrite.nv — the encoder, as a state machine the caller drains.
+//
+// THE MIRROR OF THE DECODER
+//
+// The encoder never writes, for the same reason the decoder never
+// reads: a caller may be filling a buffer, a socket or an archive
+// member, and none of those is this package's business.  So `begin`,
+// `add_frame` and `finish` each answer BYTES, and the caller puts them
+// wherever bytes go.
+//
+// A CALLER HANDS INDICES, OR IT HANDS COLOURS
+//
+// `add_frame` takes a frame whose pixels are already palette indices,
+// because an author who has a palette — a chart, a sprite sheet, a
+// screenshot of flat colours — must not have it quantised out from
+// under them.  `add_frame_rgb` takes colours and quantises, and it is
+// a separate function so that the expensive, lossy path is the one
+// that is asked for by name.
+//
+// ONE PALETTE FOR THE SEQUENCE, WHEN THERE IS A SEQUENCE
+//
+// A palette computed per frame moves every colour slightly between
+// frames, and the eye reads that as the picture shimmering.
+// `gifpalette.median_cut_shared` is the function that avoids it, and
+// `encode_animation` is the entry point that uses it, which is why an
+// animation is a function taking every frame at once rather than a
+// loop over `add_frame_rgb`.
+
+use gifframe
+use gifpalette
+use srgb
+
+// How a stream is written.
+pub struct GifWriteOptions
+    // How many colours the quantiser may choose, 2 to 256.
+    max_colors: Int
+    // How the quantiser spreads its error.
+    dither: GifDither
+    // Whether frames are written with interlaced row order.  Useful
+    // for a large still image loaded over a slow link, and pointless
+    // for an animation.
+    interlace: Bool
+    // How many times the animation plays.
+    loops: GifLoop
+    // A comment to write into a Comment Extension, or `""` for none.
+    comment: Str
+
+// The encoder.
+pub struct GifWriter
+    // The canvas every frame is placed on.
+    screen: GifScreen
+    // How this stream is being written.
+    options: GifWriteOptions
+    // How many frames have been added.
+    frame_count: Int
+    // Whether the header has been written.
+    started: Bool
+    // Whether the trailer has been written.
+    finished: Bool
+
+// The ordinary options: 256 colours, Floyd–Steinberg dithering, no
+// interlace, no loop extension, no comment.
+//
+// ```novo
+// use gifwrite
+//
+// fn main() [io]
+//     println("${gifwrite.default_options().max_colors}")   // 256
+// ```
+pub fn default_options() -> GifWriteOptions []
+    todo("gif-nv.gifwrite.default_options")
+
+// The same options with a different colour ceiling.
+//
+// Fewer colours is a smaller file and a coarser picture.  The format's
+// table sizes are powers of two, so asking for 100 gets a table of
+// 128 with 28 entries unused.
+//
+// ```novo
+// use gifwrite
+//
+// fn main() [io]
+//     println("${gifwrite.with_max_colors(gifwrite.default_options(), 64).max_colors}")
+// ```
+pub fn with_max_colors(o: GifWriteOptions, max_colors: Int) -> GifWriteOptions []
+    todo("gif-nv.gifwrite.with_max_colors")
+
+// The same options with a different dither.
+//
+// For an ANIMATION, ordered dithering is usually the better choice
+// even though it is worse on a single frame: Floyd–Steinberg's error
+// pattern changes between frames and the change is what a viewer sees
+// as crawling.
+//
+// ```novo
+// use gifpalette
+// use gifwrite
+//
+// fn main() [io]
+//     let o = gifwrite.with_dither(gifwrite.default_options(), GifDitherOrdered)
+//     println(gifpalette.dither_name(o.dither))   // ordered
+// ```
+pub fn with_dither(o: GifWriteOptions, d: GifDither) -> GifWriteOptions []
+    todo("gif-nv.gifwrite.with_dither")
+
+// The same options with a loop count.
+//
+// ```novo
+// use gifframe
+// use gifwrite
+//
+// fn main() [io]
+//     let o = gifwrite.with_loop(gifwrite.default_options(), GifLoopForever)
+//     println("${gifframe.plays_forever(o.loops)}")   // true
+// ```
+pub fn with_loop(o: GifWriteOptions, l: GifLoop) -> GifWriteOptions []
+    todo("gif-nv.gifwrite.with_loop")
+
+// The same options with interlaced row order.
+//
+// ```novo
+// use gifwrite
+//
+// fn main() [io]
+//     println("${gifwrite.with_interlace(gifwrite.default_options(), true).interlace}")
+// ```
+pub fn with_interlace(o: GifWriteOptions, interlace: Bool) -> GifWriteOptions []
+    todo("gif-nv.gifwrite.with_interlace")
+
+// The same options with a comment.
+//
+// ```novo
+// use gifwrite
+//
+// fn main() [io]
+//     println(gifwrite.with_comment(gifwrite.default_options(), "made here").comment)
+// ```
+pub fn with_comment(o: GifWriteOptions, comment: Str) -> GifWriteOptions []
+    todo("gif-nv.gifwrite.with_comment")
+
+// An encoder for a canvas.
+//
+// ```novo
+// use gifframe
+// use gifwrite
+//
+// fn main() [io]
+//     match gifframe.screen(64, 64)
+//         Ok(s)  => println("${gifwrite.writer(s, gifwrite.default_options()).frame_count}")
+//         Err(e) => println(e.message())
+// ```
+pub fn writer(s: GifScreen, o: GifWriteOptions) -> GifWriter []
+    todo("gif-nv.gifwrite.writer")
+
+// The header, the logical screen descriptor, the global colour table
+// and the loop and comment extensions.
+//
+// Answers the encoder's new state and the bytes to write.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifframe
+// use gifwrite
+//
+// fn main() [io]
+//     match gifframe.screen(64, 64)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             match gifwrite.begin(gifwrite.writer(s, gifwrite.default_options()))
+//                 Ok(step) => println("${bytes.len(step.1) >= 13}")   // true
+//                 Err(e)   => println(e.message())
+// ```
+pub fn begin(w: GifWriter) -> Result<(GifWriter, Bytes), GifFault> []
+    todo("gif-nv.gifwrite.begin")
+
+// A frame whose pixels are already palette indices.
+//
+// NOTHING IS QUANTISED.  An author who has a palette keeps it, exactly,
+// and a colour index past the end of the table that applies is
+// `GifIndexOutOfTable` rather than a silently clamped pixel.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifframe
+// use gifpalette
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     match gifframe.screen(2, 2)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//             let w = gifwrite.writer(gifframe.with_global_palette(s, p),
+//                                     gifwrite.default_options())
+//             match gifwrite.add_frame(w, gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1, 0])))
+//                 Ok(step) => println("${bytes.len(step.1) > 0}")
+//                 Err(e)   => println(e.message())
+// ```
+pub fn add_frame(w: GifWriter, f: GifFrame) -> Result<(GifWriter, Bytes), GifFault> []
+    todo("gif-nv.gifwrite.add_frame")
+
+// A frame of true colour, quantised to a palette by median cut.
+//
+// The lossy path, named so that it is asked for rather than fallen
+// into.  The palette is this frame's own and is written as a local
+// colour table, which is right for a single image and wrong for an
+// animation — `encode_animation` is the entry point that shares one
+// table across a sequence.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifframe
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     match gifframe.screen(2, 1)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             let w = gifwrite.writer(s, gifwrite.default_options())
+//             match gifwrite.add_frame_rgb(w, 0, 0, 2, 1, [srgb.black(), srgb.white()])
+//                 Ok(step) => println("${bytes.len(step.1) > 0}")
+//                 Err(e)   => println(e.message())
+// ```
+pub fn add_frame_rgb(w: GifWriter, left: Int, top: Int, width: Int, height: Int,
+                     pixels: [Srgb8]) -> Result<(GifWriter, Bytes), GifFault> []
+    todo("gif-nv.gifwrite.add_frame_rgb")
+
+// The trailer byte, and the statement that the stream is complete.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifframe
+// use gifwrite
+//
+// fn main() [io]
+//     match gifframe.screen(2, 2)
+//         Err(e) => println(e.message())
+//         Ok(s)  =>
+//             match gifwrite.finish(gifwrite.writer(s, gifwrite.default_options()))
+//                 Ok(out) => println("${bytes.len(out)}")   // 1
+//                 Err(e)    => println(e.message())
+// ```
+pub fn finish(w: GifWriter) -> Result<Bytes, GifFault> []
+    todo("gif-nv.gifwrite.finish")
+
+// A single still image, from indices and a palette, as a whole file.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifpalette
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     match gifwrite.encode_indexed(2, 2, bytes.from_byte_list([0, 1, 1, 0]), p, gifwrite.default_options())
+//         Ok(out) => println("${bytes.len(out) > 0}")
+//         Err(e)    => println(e.message())
+// ```
+pub fn encode_indexed(width: Int, height: Int, indices: Bytes, p: GifPalette,
+                      o: GifWriteOptions) -> Result<Bytes, GifFault> []
+    todo("gif-nv.gifwrite.encode_indexed")
+
+// A single still image, from true colour, as a whole file.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     match gifwrite.encode_rgb(2, 1, [srgb.black(), srgb.white()],
+//                               gifwrite.default_options())
+//         Ok(out) => println("${bytes.len(out) > 0}")
+//         Err(e)    => println(e.message())
+// ```
+pub fn encode_rgb(width: Int, height: Int, pixels: [Srgb8],
+                  o: GifWriteOptions) -> Result<Bytes, GifFault> []
+    todo("gif-nv.gifwrite.encode_rgb")
+
+// An animation, from true-colour frames, with ONE palette shared by
+// every frame.
+//
+// THE FUNCTION THAT STOPS AN ANIMATION SHIMMERING, and the reason this
+// takes the whole sequence rather than being a loop over
+// `add_frame_rgb`: the shared palette cannot be computed until every
+// frame's colours are known.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     let a = [srgb.black(), srgb.white()]
+//     let b = [srgb.white(), srgb.black()]
+//     match gifwrite.encode_animation(2, 1, [a, b], [10, 10], gifwrite.default_options())
+//         Ok(out) => println("${bytes.len(out) > 0}")
+//         Err(e)    => println(e.message())
+// ```
+pub fn encode_animation(width: Int, height: Int, frames: [[Srgb8]], delays_cs: [Int],
+                        o: GifWriteOptions) -> Result<Bytes, GifFault> []
+    todo("gif-nv.gifwrite.encode_animation")
+
+// How many bytes a stream would take, without writing it.
+//
+// An estimate and not a promise: LZW's output depends on the data, and
+// this counts the headers, the colour tables and the sub-block framing
+// exactly and the compressed data at its worst case.  What a caller
+// budgeting a buffer wants.
+//
+// ```novo
+// use gifpalette
+// use gifwrite
+// use srgb
+//
+// fn main() [io]
+//     let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+//     println("${gifwrite.upper_bound_bytes(2, 2, 1, p, gifwrite.default_options()) > 0}")
+// ```
+pub fn upper_bound_bytes(width: Int, height: Int, frame_count: Int, p: GifPalette,
+                         o: GifWriteOptions) -> Int []
+    todo("gif-nv.gifwrite.upper_bound_bytes")

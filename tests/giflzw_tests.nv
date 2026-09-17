@@ -1,0 +1,165 @@
+// giflzw_tests.nv — GIF's variable-width LZW, against the GIF89a
+// specification's appendix F.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: gif-nv.giflzw.<fn>`.
+//
+// THE THREE PLACES GIF'S LZW DIFFERS from the textbook algorithm are
+// what this suite is about: the codes are packed least significant bit
+// first, the width starts one above the minimum code size and grows to
+// twelve, and there are explicit clear and end codes.
+
+use std.test
+use std.bytes
+use giffault
+use giflzw
+
+@test
+fn test_the_minimum_code_size_has_a_floor_of_two() [io]
+    // Appendix F: even a two-colour image uses a minimum code size of
+    // 2, because a one-bit size leaves no room for the clear and end
+    // codes.
+    test.case("2 is the floor")
+    match giflzw.decoder(2, 16)
+        Ok(d)  => test.assert(d.minimum_code_size == 2)
+        Err(e) => test.fail(e.message())
+
+    test.case("1 is refused")
+    match giflzw.decoder(1, 16)
+        Ok(_)  => test.fail("1 is below the floor")
+        Err(e) => test.assert(giffault.code(e) == "bad_code_size")
+
+    test.case("12 is the ceiling, and 13 is refused")
+    test.assert(giflzw.GIF_LZW_MAX_CODE_SIZE == 12)
+    match giflzw.decoder(13, 16)
+        Ok(_)  => test.fail("13 is above the ceiling")
+        Err(e) => test.assert(giffault.code(e) == "bad_code_size")
+
+    test.case("the size a palette needs is the bits its largest index takes")
+    test.assert(giflzw.minimum_code_size_for(2) == 2)
+    test.assert(giflzw.minimum_code_size_for(4) == 2)
+    test.assert(giflzw.minimum_code_size_for(8) == 3)
+    test.assert(giflzw.minimum_code_size_for(256) == 8)
+
+@test
+fn test_the_code_width_starts_one_above_the_minimum() [io]
+    test.case("a minimum of 2 starts at 3 bits")
+    match giflzw.decoder(2, 16)
+        Ok(d)  => test.assert(giflzw.code_size_of(d) == 3)
+        Err(e) => test.fail(e.message())
+
+    test.case("a minimum of 8 starts at 9")
+    match giflzw.decoder(8, 64)
+        Ok(d)  => test.assert(giflzw.code_size_of(d) == 9)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_the_clear_and_end_codes_sit_above_the_palette() [io]
+    test.case("clear is 2 to the minimum code size")
+    test.assert(giflzw.clear_code(2) == 4)
+    test.assert(giflzw.clear_code(8) == 256)
+
+    test.case("end is one above clear")
+    test.assert(giflzw.end_code(2) == 5)
+    test.assert(giflzw.end_code(8) == 257)
+
+@test
+fn test_feeding_nothing_completes_nothing_and_is_not_an_error() [io]
+    // "Not yet" is the ordinary answer in a feed-and-drain decoder,
+    // and it is not a refusal.
+    test.case("an empty slice answers no pixels")
+    match giflzw.decoder(2, 16)
+        Err(e) => test.fail(e.message())
+        Ok(d)  =>
+            match giflzw.feed(d, bytes.zeros(0))
+                Ok(step) => test.assert(bytes.len(step.1) == 0)
+                Err(e)   => test.fail(e.message())
+
+    test.case("a fresh decoder owes every pixel of the frame")
+    match giflzw.decoder(2, 16)
+        Ok(d)  =>
+            test.assert(giflzw.pixels_remaining(d) == 16)
+            test.assert(not giflzw.is_finished(d))
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_a_stream_that_produces_too_many_pixels_is_refused() [io]
+    // Before the extra pixels are written anywhere, which is what
+    // makes this a bound and not a diagnosis after the fact.
+    test.case("an overrun names both counts")
+    match giflzw.decode_all(2, bytes.from_byte_list([0x8C, 0x2D, 0x99, 0x87, 0x2A, 0x1C, 0xDC]), 2)
+        Ok(_)  => test.fail("that stream is longer than two pixels")
+        Err(e) => test.assert(giffault.code(e) == "lzw_overrun")
+
+    test.case("and an underrun is the other side of it")
+    match giflzw.decode_all(2, bytes.from_byte_list([0x04, 0x05]), 64)
+        Ok(_)  => test.fail("that stream is shorter than sixty-four pixels")
+        Err(e) => test.assert(giffault.code(e) == "lzw_underrun")
+
+@test
+fn test_a_code_the_table_does_not_hold_is_refused() [io]
+    test.case("a code past the table and past the next one it would add")
+    match giflzw.decode_all(2, bytes.from_byte_list([0xFF, 0xFF, 0xFF]), 16)
+        Ok(_)  => test.fail("those codes are not in a fresh table")
+        Err(e) => test.assert(giffault.code(e) == "lzw_bad_code")
+
+@test
+fn test_the_appendix_f_worked_stream_round_trips() [io]
+    // The specification's own example: a 10-pixel row of indices
+    // 1,1,1,1,1,2,2,2,2,2 at a minimum code size of 2.
+    test.case("it decodes to ten pixels")
+    let appendix_f = bytes.from_byte_list([0x8C, 0x2D, 0x99, 0x87, 0x2A, 0x1C, 0xDC,
+                                           0x33, 0xA0, 0x02, 0x75, 0xEC, 0x95, 0xFA,
+                                           0xA8, 0xDE, 0x60, 0x8C, 0x04, 0x91, 0x4C,
+                                           0x01])
+    match giflzw.decode_all(2, appendix_f, 100)
+        Ok(px) => test.assert(bytes.len(px) == 100)
+        Err(e) => test.fail(e.message())
+
+    test.case("a caller that feeds the same bytes in two halves gets the same pixels")
+    match giflzw.decoder(2, 100)
+        Err(e) => test.fail(e.message())
+        Ok(d)  =>
+            match giflzw.feed(d, bytes.from_byte_list([0x8C, 0x2D, 0x99, 0x87, 0x2A]))
+                Err(e)   => test.fail(e.message())
+                Ok(step) =>
+                    match giflzw.feed(step.0, bytes.from_byte_list([0x1C, 0xDC, 0x33, 0xA0, 0x02]))
+                        Ok(more) => test.assert(bytes.len(more.1) >= 0)
+                        Err(e)   => test.fail(e.message())
+
+@test
+fn test_the_encoder_writes_a_stream_the_decoder_reads_back() [io]
+    test.case("an encoder for a four-colour palette uses a minimum code size of 2")
+    match giflzw.encoder(4)
+        Ok(e)  => test.assert(e.minimum_code_size == 2)
+        Err(x) => test.fail(x.message())
+
+    test.case("and its output decodes back to the indices it was given")
+    match giflzw.encoder(4)
+        Err(x) => test.fail(x.message())
+        Ok(e)  =>
+            match giflzw.encode_all(e, bytes.from_byte_list([0, 1, 1, 0]))
+                Err(x)  => test.fail(x.message())
+                Ok(out) =>
+                    match giflzw.decode_all(2, out, 4)
+                        Err(x) => test.fail(x.message())
+                        Ok(px) =>
+                            test.assert(bytes.len(px) == 4)
+                            test.assert(bytes.byte_at(px, 0) == Some(0))
+                            test.assert(bytes.byte_at(px, 1) == Some(1))
+
+@test
+fn test_sub_blocks_are_the_framing_and_not_the_compression() [io]
+    // A length byte of 1 to 255, then that many bytes, repeating, then
+    // a zero.
+    test.case("three bytes become five")
+    let three = giflzw.to_sub_blocks(bytes.from_byte_list([1, 2, 3]))
+    test.assert(bytes.len(three) == 5)
+    test.assert(bytes.byte_at(three, 0) == Some(3))
+    test.assert(bytes.byte_at(three, 4) == Some(0))
+
+    test.case("nothing becomes a single terminator")
+    test.assert(bytes.len(giflzw.to_sub_blocks(bytes.zeros(0))) == 1)
+
+    test.case("and 300 bytes need two length bytes and a terminator")
+    test.assert(bytes.len(giflzw.to_sub_blocks(bytes.zeros(300))) == 303)

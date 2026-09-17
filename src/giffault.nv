@@ -1,0 +1,153 @@
+// giffault.nv — every way a GIF stream can be refused, and the offset
+// that says where.
+//
+// AN OFFSET, BECAUSE A GIF IS A STREAM OF BLOCKS
+//
+// A GIF89a file is a header, a logical screen descriptor, and then a
+// sequence of blocks each introduced by a one-byte label.  When a
+// stream goes wrong it goes wrong at a block, and the byte offset of
+// that block is the only thing that lets a caller show the file, quote
+// the bytes, or tell a user which frame of a thousand is broken.  So
+// every refusal here carries one.
+//
+// TRUNCATION IS NOT CORRUPTION
+//
+// A feed-and-drain decoder is handed bytes a few at a time and is
+// asked, constantly, whether it has enough.  "Not yet" is the ordinary
+// answer and is not an error: `gifread.next` answers `None` and the
+// caller feeds more.  `GifTruncated` is the different statement that
+// the stream ENDED while a block was still open — the caller said
+// there is no more — and it is the error a downloader that lost its
+// connection must be able to tell apart from a file that is wrong.
+
+// Why a stream was refused.
+//
+// ```novo
+// use giffault
+//
+// fn main() [io]
+//     println(GifBadSignature(0).message())
+// ```
+pub enum GifFault
+    // The first six bytes are not `GIF87a` or `GIF89a`.
+    GifBadSignature(offset: Int)
+    // A block label this decoder does not know, at this offset.  The
+    // specification's block labels are 0x2C (image), 0x21 (extension)
+    // and 0x3B (trailer), and anything else means the stream is not
+    // synchronised.
+    GifUnknownBlock(offset: Int, label: Int)
+    // An extension label this decoder does not know.  NOT fatal on its
+    // own — an unknown extension's sub-blocks can be skipped, which is
+    // what the specification requires — so this is answered only when
+    // a caller asked for strict decoding.
+    GifUnknownExtension(offset: Int, label: Int)
+    // The stream ended while a block was still open.  The caller said
+    // there is no more; a caller that has more feeds it instead.
+    GifTruncated(offset: Int, expected: Int)
+    // An image descriptor's frame is not inside the logical screen.
+    // The specification does not forbid it and several encoders have
+    // produced it, so this is answered only under strict decoding, and
+    // the default is to clip.
+    GifFrameOutsideScreen(offset: Int)
+    // A pixel's colour index is past the end of the colour table that
+    // applies to its frame.
+    GifIndexOutOfTable(offset: Int, index: Int, table_size: Int)
+    // A frame has neither a local colour table nor a global one, so
+    // its indices name nothing.
+    GifNoColorTable(offset: Int)
+    // A colour table whose size is not one of the eight the format
+    // permits: 2, 4, 8, 16, 32, 64, 128 or 256 entries.
+    GifBadTableSize(offset: Int, given: Int)
+    // The LZW minimum code size is outside 2 to 12.
+    GifBadCodeSize(offset: Int, given: Int)
+    // An LZW code arrived that the decoder's table does not contain
+    // and that is not the next code it would have added.
+    GifLzwBadCode(offset: Int, code: Int)
+    // The LZW stream produced more pixels than the frame has.
+    GifLzwOverrun(offset: Int, produced: Int, expected: Int)
+    // The LZW stream ended before the frame was full.
+    GifLzwUnderrun(offset: Int, produced: Int, expected: Int)
+    // An encoder was asked for more distinct colours than a GIF
+    // palette holds.  256 is the ceiling the format sets, and the
+    // quantiser's job is to get under it.
+    GifTooManyColors(wanted: Int, limit: Int)
+    // An encoder was handed a frame whose pixel count does not match
+    // its declared width and height.
+    GifPixelCountWrong(given: Int, expected: Int)
+    // A frame larger than the canvas the encoder was opened with.
+    GifFrameTooLarge(width: Int, height: Int, canvas_width: Int, canvas_height: Int)
+    // A loop count outside the 0 to 65535 the NETSCAPE 2.0 extension's
+    // two-byte field holds.
+    GifLoopCountOutOfRange(given: Int)
+
+// `GifFault` is an `Error`, which is what lets `Result<T, GifFault>`
+// exist at all.
+impl Error for GifFault
+    // The one-line message, naming the offset and the numbers.
+    //
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("gif-nv.GifFault.message")
+
+// The byte offset the refusal is about, or `-1` for the encoder faults
+// that are about a caller's arguments rather than a stream.
+//
+// ```novo
+// use giffault
+//
+// fn main() [io]
+//     println("${giffault.offset_of(GifBadSignature(0))}")           // 0
+//     println("${giffault.offset_of(GifTooManyColors(300, 256))}")   // -1
+// ```
+pub fn offset_of(f: GifFault) -> Int []
+    todo("gif-nv.giffault.offset_of")
+
+// A short stable code for logs and metrics: `"bad_signature"`,
+// `"truncated"`, `"lzw_bad_code"`, and so on.
+//
+// Free of anything the stream carried, so it is safe as a metric
+// label.
+//
+// ```novo
+// use giffault
+//
+// fn main() [io]
+//     println(giffault.code(GifTruncated(120, 4)))   // truncated
+// ```
+pub fn code(f: GifFault) -> Str []
+    todo("gif-nv.giffault.code")
+
+// Whether feeding more bytes could still make this stream decode.
+//
+// True for `GifTruncated` alone.  A caller streaming from a network
+// asks this to decide between "wait for more" and "give up": every
+// other refusal is a statement about bytes that have already arrived
+// and will not change.
+//
+// ```novo
+// use giffault
+//
+// fn main() [io]
+//     println("${giffault.is_incomplete(GifTruncated(120, 4))}")      // true
+//     println("${giffault.is_incomplete(GifBadSignature(0))}")        // false
+// ```
+pub fn is_incomplete(f: GifFault) -> Bool []
+    todo("gif-nv.giffault.is_incomplete")
+
+// Whether this refusal is one that only strict decoding raises.
+//
+// True for `GifUnknownExtension` and `GifFrameOutsideScreen`.  The
+// specification requires a decoder to skip an extension it does not
+// know, and real files place frames past the edge of the canvas, so
+// the lenient decoder continues and the strict one stops.  A caller
+// validating files it is about to publish wants the strict answer; a
+// caller displaying a file a user gave it does not.
+//
+// ```novo
+// use giffault
+//
+// fn main() [io]
+//     println("${giffault.is_strict_only(GifUnknownExtension(30, 0x05))}")   // true
+// ```
+pub fn is_strict_only(f: GifFault) -> Bool []
+    todo("gif-nv.giffault.is_strict_only")

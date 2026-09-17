@@ -1,0 +1,230 @@
+// gifframe_tests.nv — the canvas, the frames, the disposal methods,
+// interlace and the loop extension, against the GIF89a specification's
+// sections 18, 20, 23 and the NETSCAPE 2.0 Application Extension.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: gif-nv.gifframe.<fn>`.
+
+use std.test
+use std.list
+use std.bytes
+use giffault
+use gifframe
+use gifpalette
+use srgb
+
+@test
+fn test_a_canvas_has_a_size_the_two_byte_fields_can_hold() [io]
+    test.case("an ordinary canvas")
+    match gifframe.screen(320, 240)
+        Ok(s)  =>
+            test.assert(s.width == 320)
+            test.assert(s.height == 240)
+        Err(e) => test.fail(e.message())
+
+    test.case("the largest the fields express")
+    test.assert(gifframe.GIF_MAX_DIMENSION == 65535)
+    match gifframe.screen(65535, 65535)
+        Ok(s)  => test.assert(s.width == 65535)
+        Err(e) => test.fail(e.message())
+
+    test.case("zero is not a canvas")
+    match gifframe.screen(0, 240)
+        Ok(_)  => test.fail("a canvas has width")
+        Err(e) => test.assert(giffault.code(e) == "frame_too_large")
+
+    test.case("a new canvas has no global table")
+    match gifframe.screen(4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            match s.global_palette
+                Some(_) => test.fail("nothing set one")
+                None    => test.assert(true)
+
+@test
+fn test_a_frame_is_a_patch_and_not_a_picture() [io]
+    // The mistake every caller makes once: the frames of most
+    // animations are the whole canvas, and code written against them
+    // breaks on an optimised file where frame 2 is the eleven pixels
+    // that changed.
+    test.case("a frame carries its own position and size")
+    let f = gifframe.frame(10, 20, 2, 2, bytes.from_byte_list([0, 1, 1, 0]))
+    test.assert(f.left == 10)
+    test.assert(f.top == 20)
+    test.assert(f.width == 2)
+    test.assert(f.height == 2)
+
+    test.case("a frame smaller than the canvas fits inside it")
+    match gifframe.screen(64, 64)
+        Err(e) => test.fail(e.message())
+        Ok(s)  => test.assert(gifframe.fits_screen(s, f))
+
+    test.case("and a frame past the edge does not")
+    match gifframe.screen(4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let past = gifframe.frame(3, 3, 2, 2, bytes.from_byte_list([0, 0, 0, 0]))
+            test.assert(not gifframe.fits_screen(s, past))
+
+    test.case("a new frame has no local table, no transparency and no delay")
+    match f.local_palette
+        Some(_) => test.fail("nothing set one")
+        None    => test.assert(true)
+    match f.transparent_index
+        Some(_) => test.fail("nothing set one")
+        None    => test.assert(true)
+    test.assert(f.delay_cs == 0)
+    test.assert(not f.interlaced)
+
+@test
+fn test_the_local_table_wins_and_neither_table_is_a_refusal() [io]
+    // The precedence rule of sections 19 and 21, written once, because
+    // every caller that writes it itself gets it backwards at least
+    // once.
+    let global = gifpalette.palette_padded([srgb.black(), srgb.white()])
+    let local = gifpalette.palette_padded([srgb.white(), srgb.black()])
+    let bare = gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1, 0]))
+
+    test.case("a frame with a local table uses it")
+    match gifframe.screen(4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let withg = gifframe.with_global_palette(s, global)
+            match gifframe.palette_for(withg, gifframe.with_local_palette(bare, local))
+                Some(p) =>
+                    match gifpalette.color_at(p, 0)
+                        Some(c) => test.assert(c.r == 255)
+                        None    => test.fail("the local table holds two")
+                None    => test.fail("the local table applies")
+
+    test.case("a frame without one falls back to the global table")
+    match gifframe.screen(4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            match gifframe.palette_for(gifframe.with_global_palette(s, global), bare)
+                Some(p) => test.assert(gifpalette.color_count(p) == 2)
+                None    => test.fail("the global table applies")
+
+    test.case("and a frame with neither has no table at all")
+    match gifframe.screen(4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            match gifframe.palette_for(s, bare)
+                Some(_) => test.fail("there is no table")
+                None    => test.assert(true)
+
+@test
+fn test_the_four_disposal_methods_are_typed_and_the_reserved_ones_fold() [io]
+    // Section 23's three-bit field.  Values 4 to 7 are reserved, and
+    // every renderer treats them as "unspecified".
+    test.case("the codes are 0, 1, 2, 3")
+    test.assert(gifframe.disposal_code(GifDisposeUnspecified) == 0)
+    test.assert(gifframe.disposal_code(GifDisposeKeep) == 1)
+    test.assert(gifframe.disposal_code(GifDisposeBackground) == 2)
+    test.assert(gifframe.disposal_code(GifDisposeRestore) == 3)
+
+    test.case("and the names")
+    test.assert(gifframe.disposal_name(GifDisposeUnspecified) == "unspecified")
+    test.assert(gifframe.disposal_name(GifDisposeKeep) == "keep")
+    test.assert(gifframe.disposal_name(GifDisposeBackground) == "background")
+    test.assert(gifframe.disposal_name(GifDisposeRestore) == "restore")
+
+    test.case("a reserved code folds to unspecified")
+    test.assert(gifframe.disposal_name(gifframe.disposal_from_code(6)) == "unspecified")
+    test.assert(gifframe.disposal_name(gifframe.disposal_from_code(4)) == "unspecified")
+
+    test.case("a round trip through the code preserves the method")
+    test.assert(gifframe.disposal_name(gifframe.disposal_from_code(2)) == "background")
+
+    test.case("and a frame reports the method it was given")
+    let f = gifframe.with_disposal(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), GifDisposeRestore)
+    test.assert(gifframe.disposal_name(gifframe.disposal_of(f)) == "restore")
+
+@test
+fn test_the_builders_each_set_one_thing() [io]
+    let f = gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0]))
+
+    test.case("a delay, in hundredths of a second, exactly as given")
+    test.assert(gifframe.with_delay(f, 4).delay_cs == 4)
+
+    test.case("a transparent index")
+    match gifframe.with_transparent(f, 3).transparent_index
+        Some(i) => test.assert(i == 3)
+        None    => test.fail("it was just set")
+
+    test.case("an interlace flag, which says how the rows are WRITTEN")
+    test.assert(gifframe.with_interlace(f, true).interlaced)
+    // The pixels stay top to bottom whatever the flag says: a decoder
+    // de-interlaces on the way in, so a caller never meets the file's
+    // row order unless it asks for it.
+    test.assert(bytes.len(gifframe.with_interlace(f, true).indices) == 1)
+
+    test.case("and a local colour table")
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+    match gifframe.with_local_palette(f, p).local_palette
+        Some(_) => test.assert(true)
+        None    => test.fail("it was just set")
+
+@test
+fn test_the_interlaced_row_order_is_the_four_passes() [io]
+    // Section 20: pass 1 is every eighth row from 0, pass 2 every
+    // eighth from 4, pass 3 every fourth from 2, pass 4 every second
+    // from 1.
+    test.case("an eight-row frame")
+    let order = gifframe.interlace_row_order(8)
+    test.assert(list.len(order) == 8)
+    test.assert(list.get(order, 0) == 0)
+    test.assert(list.get(order, 1) == 4)
+    test.assert(list.get(order, 2) == 2)
+    test.assert(list.get(order, 3) == 6)
+    test.assert(list.get(order, 4) == 1)
+    test.assert(list.get(order, 7) == 7)
+
+    test.case("every row appears exactly once, whatever the height")
+    test.assert(list.len(gifframe.interlace_row_order(17)) == 17)
+
+    test.case("and a one-row frame is its own order")
+    test.assert(list.get(gifframe.interlace_row_order(1), 0) == 0)
+
+@test
+fn test_the_loop_extension_has_three_states_and_not_a_number() [io]
+    // "No NETSCAPE extension" and "a NETSCAPE extension saying 0" are
+    // different files that behave differently, and an Int cannot hold
+    // the difference.
+    test.case("absent plays once")
+    test.assert(not gifframe.plays_forever(GifLoopAbsent))
+
+    test.case("a count of zero is forever")
+    match gifframe.loop_from_count(0)
+        Ok(l)  => test.assert(gifframe.plays_forever(l))
+        Err(e) => test.fail(e.message())
+
+    test.case("a count above zero is that many")
+    match gifframe.loop_from_count(3)
+        Ok(l)  => test.assert(not gifframe.plays_forever(l))
+        Err(e) => test.fail(e.message())
+
+    test.case("and a count past the two-byte field is refused")
+    match gifframe.loop_from_count(65536)
+        Ok(_)  => test.fail("the field holds two bytes")
+        Err(e) => test.assert(giffault.code(e) == "loop_count_out_of_range")
+
+@test
+fn test_the_delay_is_reported_as_the_file_states_it() [io]
+    // Every major browser substitutes 10 for a delay below 2, so a
+    // file that says 1 plays ten times slower in a browser than in an
+    // image viewer.  Reading a file must not silently change what it
+    // said, which is why this is a separate function.
+    test.case("a file's delay comes back unchanged")
+    test.assert(gifframe.with_delay(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), 1).delay_cs == 1)
+
+    test.case("and the browser's substitution is asked for by name")
+    test.assert(gifframe.browser_delay_cs(0) == 10)
+    test.assert(gifframe.browser_delay_cs(1) == 10)
+    test.assert(gifframe.browser_delay_cs(2) == 2)
+    test.assert(gifframe.browser_delay_cs(4) == 4)
+
+    test.case("a sequence's duration is the sum of what the file says")
+    let a = gifframe.with_delay(gifframe.frame(0, 0, 1, 1, bytes.from_byte_list([0])), 4)
+    test.assert(gifframe.total_duration_cs([a, a, a]) == 12)
+    test.assert(gifframe.total_duration_cs([]) == 0)

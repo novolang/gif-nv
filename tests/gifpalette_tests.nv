@@ -1,0 +1,160 @@
+// gifpalette_tests.nv — the colour tables, the transparent index and
+// the median-cut quantiser, against the GIF89a specification's
+// sections 18, 19, 20 and 23.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: gif-nv.gifpalette.<fn>`.
+
+use std.test
+use std.list
+use std.bytes
+use giffault
+use gifpalette
+use srgb
+
+@test
+fn test_a_table_size_is_one_of_eight_and_the_others_are_refused() [io]
+    // Section 18: the table size is stored as a three-bit exponent, so
+    // the only sizes that can be written are 2, 4, 8, 16, 32, 64, 128
+    // and 256.
+    test.case("two entries is a table")
+    match gifpalette.palette([srgb.black(), srgb.white()])
+        Ok(p)  => test.assert(gifpalette.color_count(p) == 2)
+        Err(e) => test.fail(e.message())
+
+    test.case("three is not, and is refused at construction")
+    match gifpalette.palette([srgb.black(), srgb.white(), srgb.black()])
+        Ok(_)  => test.fail("three is not a table size")
+        Err(e) => test.assert(giffault.code(e) == "bad_table_size")
+
+    test.case("257 is past the format's ceiling")
+    test.assert(gifpalette.GIF_MAX_COLORS == 256)
+
+    test.case("padding rounds up to the next size the format can express")
+    let padded = gifpalette.palette_padded([srgb.black(), srgb.white(), srgb.black()])
+    test.assert(gifpalette.color_count(padded) == 4)
+
+    test.case("and the exponent is log2(count) - 1")
+    test.assert(gifpalette.size_exponent(gifpalette.palette_padded([srgb.white()])) == 0)
+    test.assert(gifpalette.size_exponent(padded) == 1)
+
+@test
+fn test_an_index_past_the_table_is_none_and_not_a_clamp() [io]
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("an index inside the table names a colour")
+    match gifpalette.color_at(p, 1)
+        Some(c) => test.assert(c.r == 255)
+        None    => test.fail("index 1 is in a table of two")
+
+    test.case("an index past it is None")
+    match gifpalette.color_at(p, 9)
+        Some(_) => test.fail("the table holds two")
+        None    => test.assert(true)
+
+@test
+fn test_transparency_is_an_index_and_the_alpha_is_binary() [io]
+    // Section 23: the Graphic Control Extension nominates one index
+    // per frame as transparent.  There is no alpha channel anywhere in
+    // the format, so a pixel is drawn or it is not.
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("the transparent index resolves to a fully transparent pixel")
+    match gifpalette.resolve(p, 0, 0)
+        Some(px) => test.assert(px.a == 0)
+        None     => test.fail("index 0 is in the table")
+
+    test.case("every other index resolves fully opaque")
+    match gifpalette.resolve(p, 1, 0)
+        Some(px) =>
+            test.assert(px.a == 255)
+            test.assert(px.rgb.r == 255)
+        None     => test.fail("index 1 is in the table")
+
+    test.case("and nothing in between — a fade cannot be expressed")
+    match gifpalette.resolve(p, 1, 9)
+        Some(px) => test.assert(px.a == 255)
+        None     => test.fail("index 1 is in the table")
+
+@test
+fn test_the_nearest_entry_is_by_squared_distance_in_srgb() [io]
+    // Not perceptual, and the README says so: it is what every GIF
+    // encoder does and what the reference implementations do.
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("near white takes the white entry")
+    test.assert(gifpalette.nearest_index(p, srgb.rgb8(250, 250, 250)) == 1)
+
+    test.case("near black takes the black one")
+    test.assert(gifpalette.nearest_index(p, srgb.rgb8(4, 4, 4)) == 0)
+
+    test.case("an exact match takes its own entry")
+    test.assert(gifpalette.nearest_index(p, srgb.white()) == 1)
+
+@test
+fn test_an_exact_palette_is_detected_so_it_is_not_quantised_away() [io]
+    // An author with a palette — a chart, a sprite, a screenshot of
+    // flat colours — must have it written exactly.
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("a covered image needs no quantiser")
+    test.assert(gifpalette.covers(p, [srgb.white(), srgb.black()]))
+
+    test.case("one colour outside the table is not covered")
+    test.assert(not gifpalette.covers(p, [srgb.rgb8(1, 2, 3)]))
+
+    test.case("distinct colours come back in first-seen order")
+    let d = gifpalette.distinct_colors([srgb.white(), srgb.black(), srgb.white()], 256)
+    test.assert(list.len(d) == 2)
+    test.assert(list.get(d, 0).r == 255)
+
+    test.case("and the scan stops at the limit rather than collecting everything")
+    test.assert(list.len(gifpalette.distinct_colors(
+        [srgb.white(), srgb.black(), srgb.rgb8(1, 1, 1)], 2)) == 2)
+
+@test
+fn test_median_cut_is_deterministic_and_bounded() [io]
+    test.case("it never answers more colours than it was asked for")
+    match gifpalette.median_cut([srgb.black(), srgb.white()], 16)
+        Ok(p)  => test.assert(gifpalette.color_count(p) <= 16)
+        Err(e) => test.fail(e.message())
+
+    test.case("the same pixels give the same palette twice")
+    // Deterministic, which is what lets a sequence share one table
+    // without the colours drifting between frames.
+    let px = [srgb.black(), srgb.white(), srgb.rgb8(128, 0, 0)]
+    match gifpalette.median_cut(px, 4)
+        Err(e) => test.fail(e.message())
+        Ok(a)  =>
+            match gifpalette.median_cut(px, 4)
+                Err(e) => test.fail(e.message())
+                Ok(b)  => test.assert(gifpalette.color_count(a) == gifpalette.color_count(b))
+
+    test.case("more than 256 colours is refused, because the format has no room")
+    match gifpalette.median_cut([srgb.black()], 300)
+        Ok(_)  => test.fail("300 is past the format's ceiling")
+        Err(e) => test.assert(giffault.code(e) == "too_many_colors")
+
+    test.case("a shared palette covers every frame it was built from")
+    match gifpalette.median_cut_shared([[srgb.black()], [srgb.white()]], 16)
+        Ok(p)  => test.assert(gifpalette.color_count(p) <= 16)
+        Err(e) => test.fail(e.message())
+
+@test
+fn test_quantising_answers_one_index_per_pixel() [io]
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("the three dithers are named")
+    test.assert(gifpalette.dither_name(GifDitherNone) == "none")
+    test.assert(gifpalette.dither_name(GifDitherFloydSteinberg) == "floyd-steinberg")
+    test.assert(gifpalette.dither_name(GifDitherOrdered) == "ordered")
+
+    test.case("one index per pixel, whatever the dither")
+    test.assert(bytes.len(gifpalette.quantize([srgb.white(), srgb.black()], p, 2,
+                                              GifDitherNone)) == 2)
+    test.assert(bytes.len(gifpalette.quantize([srgb.white(), srgb.black()], p, 2,
+                                              GifDitherFloydSteinberg)) == 2)
+
+    test.case("without dithering an exact colour takes its own entry")
+    test.assert(bytes.byte_at(gifpalette.quantize([srgb.white()], p, 1, GifDitherNone), 0)
+                == Some(1))

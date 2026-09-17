@@ -1,0 +1,258 @@
+// gifcodec_tests.nv — the feed-and-drain decoder and the encoder,
+// against the GIF89a specification's sections 17 to 26.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: gif-nv.<module>.<fn>`.
+//
+// THE HEADER USED THROUGHOUT is the thirteen bytes of a GIF89a file
+// with a 64-by-32 canvas and no global colour table.
+
+use std.test
+use std.list
+use std.bytes
+use giffault
+use gifframe
+use gifpalette
+use gifread
+use gifwrite
+use srgb
+
+// `GIF89a`, a 64-by-32 logical screen, no global colour table.
+fn header() -> Bytes
+    bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x39, 0x61,
+                          0x40, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00])
+
+@test
+fn test_the_signature_is_six_bytes_and_a_sniffer_needs_no_more() [io]
+    test.case("GIF89a is a GIF")
+    test.assert(gifread.looks_like_gif(header()))
+
+    test.case("GIF87a is too — this decoder reads both")
+    test.assert(gifread.looks_like_gif(bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])))
+
+    test.case("anything else is not")
+    test.assert(not gifread.looks_like_gif(bytes.from_byte_list([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A])))
+
+    test.case("and a slice too short to tell is not a GIF yet, not a refusal")
+    test.assert(not gifread.looks_like_gif(bytes.from_byte_list([0x47, 0x49])))
+
+@test
+fn test_the_size_is_probed_before_a_buffer_is_considered() [io]
+    // A two-byte width and a two-byte height multiply to four thousand
+    // million, so a thirteen-byte header can ask for a buffer no
+    // machine has.  This is the answer a size limit is checked
+    // against, and it costs no allocation.
+    test.case("the canvas is read from the first thirteen bytes")
+    match gifread.probe_size(header())
+        Some(wh) =>
+            test.assert(wh.0 == 64)
+            test.assert(wh.1 == 32)
+        None     => test.fail("thirteen bytes is enough")
+
+    test.case("fewer bytes answer None rather than guessing")
+    match gifread.probe_size(bytes.from_byte_list([0x47, 0x49, 0x46]))
+        Some(_) => test.fail("three bytes is not a screen descriptor")
+        None    => test.assert(true)
+
+@test
+fn test_the_options_say_how_strict_and_how_large() [io]
+    test.case("the default is lenient, with a canvas and a frame ceiling")
+    let o = gifread.default_options()
+    test.assert(not o.strict)
+    test.assert(o.max_pixels > 0)
+    test.assert(o.max_frames == 4096)
+
+    test.case("strict refuses what the specification lets a decoder skip")
+    test.assert(gifread.strict_options().strict)
+
+    test.case("and each ceiling is set on its own")
+    test.assert(gifread.with_max_pixels(o, 1000).max_pixels == 1000)
+    test.assert(gifread.with_max_frames(o, 8).max_frames == 8)
+
+@test
+fn test_feeding_bytes_completes_events_and_nothing_else() [io]
+    test.case("a fresh reader has read nothing")
+    let r = gifread.reader(gifread.default_options())
+    test.assert(r.offset == 0)
+    test.assert(not gifread.is_complete(r))
+
+    test.case("six bytes complete no event — the screen needs thirteen")
+    match gifread.feed(r, bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))
+        Ok(step) => test.assert(list.len(step.1) == 0)
+        Err(e)   => test.fail(e.message())
+
+    test.case("thirteen complete the screen")
+    match gifread.feed(r, header())
+        Err(e)   => test.fail(e.message())
+        Ok(step) =>
+            test.assert(list.len(step.1) == 1)
+            test.assert(gifread.event_name(list.get(step.1, 0)) == "screen")
+
+    test.case("a bad signature is refused at offset zero")
+    match gifread.feed(r, bytes.from_byte_list([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+        Ok(_)  => test.fail("that is a PNG")
+        Err(e) =>
+            test.assert(giffault.code(e) == "bad_signature")
+            test.assert(giffault.offset_of(e) == 0)
+
+@test
+fn test_truncation_is_the_callers_statement_and_not_the_decoders_guess() [io]
+    // `next` answering nothing means "feed more".  Only the caller
+    // knows the stream has ended, so only `finish` can say truncated.
+    test.case("a stream that stops mid-header is truncated when the caller says so")
+    let r = gifread.reader(gifread.default_options())
+    match gifread.feed(r, bytes.from_byte_list([0x47, 0x49, 0x46]))
+        Err(e)   => test.fail(e.message())
+        Ok(step) =>
+            match gifread.finish(step.0)
+                Ok(_)  => test.fail("three bytes is not a stream")
+                Err(e) =>
+                    test.assert(giffault.code(e) == "truncated")
+                    test.assert(giffault.is_incomplete(e))
+
+    test.case("and truncation is the ONLY refusal more bytes could fix")
+    test.assert(not giffault.is_incomplete(GifBadSignature(0)))
+    test.assert(not giffault.is_incomplete(GifLzwBadCode(40, 511)))
+
+    test.case("the refusals only strict decoding raises are marked as such")
+    test.assert(giffault.is_strict_only(GifUnknownExtension(30, 0x05)))
+    test.assert(giffault.is_strict_only(GifFrameOutsideScreen(30)))
+    test.assert(not giffault.is_strict_only(GifBadSignature(0)))
+
+    test.case("an encoder fault is about arguments, so it has no offset")
+    test.assert(giffault.offset_of(GifTooManyColors(300, 256)) == 0 - 1)
+    test.assert(giffault.code(GifPixelCountWrong(3, 4)) == "pixel_count_wrong")
+
+@test
+fn test_the_one_shot_decoders_answer_events_and_frames() [io]
+    test.case("decode_all answers every event of a complete stream")
+    match gifread.decode_all(header(), gifread.default_options())
+        Ok(_)  => test.fail("that stream has no trailer")
+        Err(e) => test.assert(giffault.is_incomplete(e))
+
+    test.case("frames_of answers only the frames")
+    match gifread.frames_of(header(), gifread.default_options())
+        Ok(_)  => test.fail("that stream has no trailer")
+        Err(e) => test.assert(giffault.code(e) == "truncated")
+
+    test.case("and the event names are the ones a caller matches on")
+    test.assert(gifread.event_name(GifTrailer) == "trailer")
+
+@test
+fn test_the_write_options_say_how_many_colours_and_how_to_dither() [io]
+    let o = gifwrite.default_options()
+
+    test.case("the defaults")
+    test.assert(o.max_colors == 256)
+    test.assert(gifpalette.dither_name(o.dither) == "floyd-steinberg")
+    test.assert(not o.interlace)
+    test.assert(o.comment == "")
+
+    test.case("each builder sets one thing")
+    test.assert(gifwrite.with_max_colors(o, 64).max_colors == 64)
+    test.assert(gifpalette.dither_name(gifwrite.with_dither(o, GifDitherOrdered).dither)
+                == "ordered")
+    test.assert(gifwrite.with_interlace(o, true).interlace)
+    test.assert(gifwrite.with_comment(o, "made here").comment == "made here")
+    test.assert(gifframe.plays_forever(gifwrite.with_loop(o, GifLoopForever).loops))
+
+@test
+fn test_the_encoder_hands_back_bytes_and_never_writes_them() [io]
+    test.case("begin answers at least the thirteen header bytes")
+    match gifframe.screen(64, 32)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let w = gifwrite.writer(s, gifwrite.default_options())
+            test.assert(w.frame_count == 0)
+            match gifwrite.begin(w)
+                Ok(step) => test.assert(bytes.len(step.1) >= 13)
+                Err(e)   => test.fail(e.message())
+
+    test.case("finish answers the single trailer byte")
+    match gifframe.screen(2, 2)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            match gifwrite.finish(gifwrite.writer(s, gifwrite.default_options()))
+                Ok(out) => test.assert(bytes.len(out) == 1)
+                Err(e)  => test.fail(e.message())
+
+@test
+fn test_indices_are_written_exactly_and_colours_are_quantised_by_name() [io]
+    // An author who has a palette — a chart, a sprite, a screenshot of
+    // flat colours — must have it written exactly.  The lossy path is
+    // a different function.
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("a frame of indices is written against the table that applies")
+    match gifframe.screen(2, 2)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let w = gifwrite.writer(gifframe.with_global_palette(s, p),
+                                    gifwrite.default_options())
+            match gifwrite.add_frame(w, gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1, 0])))
+                Ok(step) => test.assert(bytes.len(step.1) > 0)
+                Err(e)   => test.fail(e.message())
+
+    test.case("an index past the table is refused and not clamped")
+    match gifframe.screen(2, 2)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let w = gifwrite.writer(gifframe.with_global_palette(s, p),
+                                    gifwrite.default_options())
+            match gifwrite.add_frame(w, gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 9, 0])))
+                Ok(_)  => test.fail("9 is past a table of two")
+                Err(e) => test.assert(giffault.code(e) == "index_out_of_table")
+
+    test.case("a pixel count that disagrees with the frame's size is refused")
+    match gifframe.screen(2, 2)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let w = gifwrite.writer(gifframe.with_global_palette(s, p),
+                                    gifwrite.default_options())
+            match gifwrite.add_frame(w, gifframe.frame(0, 0, 2, 2, bytes.from_byte_list([0, 1, 1])))
+                Ok(_)  => test.fail("three pixels is not a two-by-two frame")
+                Err(e) => test.assert(giffault.code(e) == "pixel_count_wrong")
+
+    test.case("true colour goes through the quantiser, which is a named call")
+    match gifframe.screen(2, 1)
+        Err(e) => test.fail(e.message())
+        Ok(s)  =>
+            let w = gifwrite.writer(s, gifwrite.default_options())
+            match gifwrite.add_frame_rgb(w, 0, 0, 2, 1, [srgb.black(), srgb.white()])
+                Ok(step) => test.assert(bytes.len(step.1) > 0)
+                Err(e)   => test.fail(e.message())
+
+@test
+fn test_the_whole_file_helpers_and_the_size_estimate() [io]
+    let p = gifpalette.palette_padded([srgb.black(), srgb.white()])
+
+    test.case("a still image from indices")
+    match gifwrite.encode_indexed(2, 2, bytes.from_byte_list([0, 1, 1, 0]), p, gifwrite.default_options())
+        Ok(out) =>
+            test.assert(bytes.len(out) > 13)
+            test.assert(gifread.looks_like_gif(out))
+        Err(e)  => test.fail(e.message())
+
+    test.case("a still image from colours")
+    match gifwrite.encode_rgb(2, 1, [srgb.black(), srgb.white()],
+                              gifwrite.default_options())
+        Ok(out) => test.assert(gifread.looks_like_gif(out))
+        Err(e)  => test.fail(e.message())
+
+    test.case("an animation shares ONE palette across its frames")
+    // A palette per frame moves every colour slightly between frames,
+    // and the eye reads that as the picture shimmering.
+    match gifwrite.encode_animation(2, 1, [[srgb.black(), srgb.white()],
+                                           [srgb.white(), srgb.black()]],
+                                    [10, 10], gifwrite.default_options())
+        Ok(out) => test.assert(gifread.looks_like_gif(out))
+        Err(e)  => test.fail(e.message())
+
+    test.case("a frame larger than the canvas is refused")
+    match gifwrite.encode_animation(1, 1, [[srgb.black(), srgb.white()]], [10],
+                                    gifwrite.default_options())
+        Ok(_)  => test.fail("two pixels is not a one-by-one frame")
+        Err(e) => test.assert(giffault.code(e) == "pixel_count_wrong")
+
+    test.case("and the size estimate is an upper bound a buffer can be sized from")
+    test.assert(gifwrite.upper_bound_bytes(2, 2, 1, p, gifwrite.default_options()) > 13)

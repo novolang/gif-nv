@@ -1,0 +1,292 @@
+// gifread.nv — the decoder, as a state machine the caller feeds.
+//
+// FEED AND DRAIN
+//
+// A decoder that opened the file would be a decoder nobody could drive
+// from a socket, from a memory-mapped archive member, or from a
+// download that is still arriving.  So this one never reads: `feed`
+// takes a slice of bytes the caller already holds, and `next` takes
+// out whatever those bytes completed.  Between the two calls the
+// decoder is a value, and a caller can put it down.
+//
+// "NOT YET" IS NOT AN ERROR
+//
+// `next` answers `None` when the bytes so far do not complete another
+// event.  That is the ordinary answer and the caller feeds more.  The
+// stream ENDING mid-block is the different statement, and it is
+// `GifTruncated`, raised by `finish` rather than by `next` — because
+// only the caller knows there is no more.
+//
+// AN EVENT, NOT A CALLBACK
+//
+// The decoder hands back events rather than calling into the caller,
+// so that the caller owns its own control flow: a caller that wants
+// only the first frame stops, a caller that wants the metadata and no
+// pixels never asks for them, and neither has to unwind out of a
+// callback to do it.
+//
+// WHAT AN EVENT CARRIES, AND WHAT IT DOES NOT
+//
+// `GifFrameDecoded` carries the whole frame, pixels included.  That is
+// an allocation per frame, and it is deliberate: a GIF frame is at
+// most 65535 by 65535 indices but is in practice a few hundred
+// kilobytes, and an API that handed back a borrowed buffer would make
+// every caller copy it anyway before the next feed invalidated it.
+// `GifFrameStarted` arrives first and carries everything but the
+// pixels, so a caller that only wants to know what is in a file — how
+// many frames, what size, how long — never pays for the pixels at all.
+
+// How strict a decoder is about the things the specification permits
+// and real files get wrong.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.default_options().strict}")   // false
+// ```
+pub struct GifReadOptions
+    // Whether to refuse an unknown extension and a frame outside the
+    // canvas rather than skipping and clipping.  A validator wants
+    // true; a viewer showing a file a user chose wants false.
+    strict: Bool
+    // The largest canvas this decoder will accept, in pixels of area.
+    // A two-byte width and a two-byte height multiply to four
+    // thousand million, so a header alone can ask for a buffer no
+    // machine has — and a decoder without this limit is a decompression
+    // bomb with a nice API.
+    max_pixels: Int
+    // The largest number of frames to decode before refusing.  A GIF
+    // has no frame count in its header, and a small file can contain
+    // a great many one-pixel frames.
+    max_frames: Int
+
+// What the decoder found.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println(gifread.event_name(GifTrailer))   // trailer
+// ```
+pub enum GifEvent
+    // The header and logical screen descriptor, with the global
+    // colour table if there is one.  Always the first event.
+    GifScreenRead(screen: GifScreen)
+    // A NETSCAPE 2.0 Application Extension.  Arrives before the frames
+    // it applies to, which is where the format puts it.
+    GifLoopRead(loops: GifLoop)
+    // A Comment Extension's text, as raw bytes — the specification
+    // says ASCII and files carry anything.
+    GifCommentRead(text: Bytes)
+    // An Application Extension this decoder does not interpret: its
+    // eight-byte identifier, its three-byte authentication code, and
+    // its data.  Reported rather than dropped, because XMP metadata
+    // and several animation tools' own extensions travel this way.
+    GifApplicationRead(identifier: Bytes, authentication: Bytes, data: Bytes)
+    // A frame's descriptor and its Graphic Control Extension, before
+    // the pixels are decompressed.  Everything but `indices` is
+    // already correct on the frame this carries.
+    GifFrameStarted(frame: GifFrame)
+    // A frame, pixels included and already de-interlaced.
+    GifFrameDecoded(frame: GifFrame)
+    // The trailer byte.  The stream is complete.
+    GifTrailer
+
+// The decoder.
+pub struct GifReader
+    // How strict this decoder is.
+    options: GifReadOptions
+    // How many bytes have been fed in total, which is what a refusal's
+    // offset is measured in.
+    offset: Int
+    // How many frames have been decoded.
+    frame_count: Int
+    // Whether the trailer has been seen.
+    finished: Bool
+
+// The ordinary options: lenient, at most 64 million pixels of canvas,
+// at most 4096 frames.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.default_options().max_frames}")   // 4096
+// ```
+pub fn default_options() -> GifReadOptions []
+    todo("gif-nv.gifread.default_options")
+
+// The strict options: every deviation the specification permits a
+// decoder to ignore is refused instead.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.strict_options().strict}")   // true
+// ```
+pub fn strict_options() -> GifReadOptions []
+    todo("gif-nv.gifread.strict_options")
+
+// The same options with a different canvas ceiling.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.with_max_pixels(gifread.default_options(), 1000).max_pixels}")
+// ```
+pub fn with_max_pixels(o: GifReadOptions, max_pixels: Int) -> GifReadOptions []
+    todo("gif-nv.gifread.with_max_pixels")
+
+// The same options with a different frame ceiling.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.with_max_frames(gifread.default_options(), 8).max_frames}")   // 8
+// ```
+pub fn with_max_frames(o: GifReadOptions, max_frames: Int) -> GifReadOptions []
+    todo("gif-nv.gifread.with_max_frames")
+
+// A decoder that has been fed nothing.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.reader(gifread.default_options()).offset}")   // 0
+// ```
+pub fn reader(o: GifReadOptions) -> GifReader []
+    todo("gif-nv.gifread.reader")
+
+// Bytes in.  Answers the decoder's new state and every event those
+// bytes completed.
+//
+// A slice that completes nothing answers an empty list, which is the
+// ordinary case when a caller feeds 1500 bytes at a time.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifread
+//
+// fn main() [io]
+//     let r = gifread.reader(gifread.default_options())
+//     match gifread.feed(r, bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))
+//         Ok(step) => println("${list.len(step.1)}")   // 0 — the screen needs seven more bytes
+//         Err(e)   => println(e.message())
+// ```
+pub fn feed(r: GifReader, bytes: Bytes) -> Result<(GifReader, [GifEvent]), GifFault> []
+    todo("gif-nv.gifread.feed")
+
+// The statement that there are no more bytes.
+//
+// Answers `GifTruncated` when a block is still open — which is the
+// refusal a caller whose download failed needs, and the one `feed`
+// cannot raise, because only the caller knows the stream has ended.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     match gifread.finish(gifread.reader(gifread.default_options()))
+//         Ok(_)  => println("a stream that is nothing at all is not complete")
+//         Err(e) => println(e.message())
+// ```
+pub fn finish(r: GifReader) -> Result<[GifEvent], GifFault> []
+    todo("gif-nv.gifread.finish")
+
+// Whether the trailer has been seen.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.is_complete(gifread.reader(gifread.default_options()))}")   // false
+// ```
+pub fn is_complete(r: GifReader) -> Bool []
+    todo("gif-nv.gifread.is_complete")
+
+// The event's name: `"screen"`, `"loop"`, `"comment"`,
+// `"application"`, `"frame-started"`, `"frame"`, `"trailer"`.
+//
+// ```novo
+// use gifread
+//
+// fn main() [io]
+//     println(gifread.event_name(GifTrailer))   // trailer
+// ```
+pub fn event_name(e: GifEvent) -> Str []
+    todo("gif-nv.gifread.event_name")
+
+// A whole stream decoded at once, for a caller that already holds
+// every byte.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifread
+//
+// fn main() [io]
+//     match gifread.decode_all(bytes.from_byte_list([0x47, 0x49, 0x46]), gifread.default_options())
+//         Ok(events) => println("${list.len(events)}")
+//         Err(e)     => println(e.message())
+// ```
+pub fn decode_all(bytes: Bytes, o: GifReadOptions) -> Result<[GifEvent], GifFault> []
+    todo("gif-nv.gifread.decode_all")
+
+// Only the frames of a stream, for the ordinary case.
+//
+// ```novo
+// use std.bytes
+// use std.list
+// use gifread
+//
+// fn main() [io]
+//     match gifread.frames_of(bytes.from_byte_list([0x47, 0x49, 0x46]), gifread.default_options())
+//         Ok(frames) => println("${list.len(frames)}")
+//         Err(e)     => println(e.message())
+// ```
+pub fn frames_of(bytes: Bytes, o: GifReadOptions) -> Result<[GifFrame], GifFault> []
+    todo("gif-nv.gifread.frames_of")
+
+// Whether these bytes begin `GIF87a` or `GIF89a`.
+//
+// Six bytes, so it answers on a header a caller has barely started
+// reading.  It is what a format sniffer calls, and it never refuses:
+// a short slice is simply not a GIF yet.
+//
+// ```novo
+// use std.bytes
+// use gifread
+//
+// fn main() [io]
+//     println("${gifread.looks_like_gif(bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))}")   // true
+// ```
+pub fn looks_like_gif(bytes: Bytes) -> Bool []
+    todo("gif-nv.gifread.looks_like_gif")
+
+// The canvas size read from the first thirteen bytes, without
+// decoding anything else.
+//
+// WHAT A SIZE LIMIT IS CHECKED AGAINST.  A caller deciding whether to
+// accept a file at all asks this first: the answer costs thirteen
+// bytes and no allocation, and a canvas of 65535 by 65535 is refused
+// before a buffer for it is ever considered.
+//
+// ```novo
+// use std.bytes
+// use gifread
+//
+// fn main() [io]
+//     let head = bytes.from_byte_list([0x47, 0x49, 0x46, 0x38, 0x39, 0x61,
+//                                      0x40, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00])
+//     match gifread.probe_size(head)
+//         Some(wh) => println("${wh.0} by ${wh.1}")   // 64 by 32
+//         None     => println("not enough bytes yet")
+// ```
+pub fn probe_size(bytes: Bytes) -> ?(Int, Int) []
+    todo("gif-nv.gifread.probe_size")
