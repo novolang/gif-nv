@@ -1,6 +1,6 @@
 [package]
 name        = "gif-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "GIF89a as a feed-and-drain codec: bytes pushed in and frames pulled out, with LZW, interlace, global and local colour tables, the four disposal methods, delays and the NETSCAPE loop extension all typed rather than inferred; and an encoder with a median-cut quantiser and optional dithering.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
@@ -40,4 +40,4 @@ novo        = ">= 0.9.0"
 # different names.  `Srgba8` is what a frame's pixels become once the
 # transparent index has been applied, which is why both appear.
 # `core`, so the layer rule holds.
-color-nv = "^0.0.1"
+color-nv = "^0.1.1"
